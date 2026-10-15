@@ -62,6 +62,13 @@ Remove-Item $tempPyExtract -Force
 
 $lines = $result -split "`n"
 $Token = $lines[0].Trim()
+
+# Prefer external token file (git_sync.ps1 no longer stores the PAT inline)
+$extTokenFile = Join-Path $HOME '.cfnb_github_token'
+if (Test-Path $extTokenFile) {
+    $extToken = (Get-Content $extTokenFile -Raw).Trim()
+    if ($extToken -ne '') { $Token = $extToken }
+}
 $Username = $lines[1].Trim()
 $Repo = $lines[2].Trim()
 $Branch = $lines[3].Trim()

@@ -280,6 +280,7 @@ def load_config():
         "BANDWIDTH_URL_TEMPLATE": "{scheme}://speed.cloudflare.com:{port}/__down?bytes={bytes}",
         "BANDWIDTH_PROCESS_BUFFER": 2,
         "BANDWIDTH_CONNECT_TIMEOUT": 3,
+        "BANDWIDTH_SAMPLES": 2,
         "SPEED_WEIGHT": 3.0,
         "IP_CALIBRATION_CONCURRENCY": 300,
         "MAX_WORKERS": 300,
@@ -402,6 +403,7 @@ BANDWIDTH_RETRY_DELAY = cfg["BANDWIDTH_RETRY_DELAY"]
 BANDWIDTH_URL_TEMPLATE = cfg["BANDWIDTH_URL_TEMPLATE"]
 BANDWIDTH_PROCESS_BUFFER = cfg["BANDWIDTH_PROCESS_BUFFER"]
 BANDWIDTH_CONNECT_TIMEOUT = cfg["BANDWIDTH_CONNECT_TIMEOUT"]
+BANDWIDTH_SAMPLES = cfg.get("BANDWIDTH_SAMPLES", 2)
 SPEED_WEIGHT = cfg["SPEED_WEIGHT"]
 IP_CALIBRATION_CONCURRENCY = cfg["IP_CALIBRATION_CONCURRENCY"]
 MAX_WORKERS = cfg["MAX_WORKERS"]
@@ -1312,7 +1314,6 @@ def measure_bandwidth_curl(node_str):
     # ---------------------------------------
 
     null_device = "NUL" if sys.platform == "win32" else "/dev/null"
-    expected_size = BANDWIDTH_SIZE_MB * 1024 * 1024
 
     # 用模板生成最终 URL，替换 {scheme}、{port}、{bytes}
     url = BANDWIDTH_URL_TEMPLATE.format(
@@ -1321,33 +1322,50 @@ def measure_bandwidth_curl(node_str):
         bytes=int(BANDWIDTH_SIZE_MB * 1024 * 1024)
     )
 
-    curl_cmd = [
-        "curl", "-s", "-o", null_device,
-        "-w", "%{size_download} %{time_starttransfer} %{time_total}",
-        "-L",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "--noproxy", "*",
-        "--resolve", f"speed.cloudflare.com:{port}:{ip}",
-        "--connect-timeout", str(BANDWIDTH_CONNECT_TIMEOUT),
-        "--max-time", str(BANDWIDTH_TIMEOUT),
-    ] + insecure_flag + [url]   # 动态添加 --insecure（如果是 https）
+    # ---------- 多次测量取中位数，消除突发(burst)抖动 ----------
+    # 单节点测速次数（可从配置读取，默认 2）
+    samples_cfg = globals().get("BANDWIDTH_SAMPLES", 2)
+    # 至少下载这么多字节才算一次有效样本（避免刚连上就断导致虚高）
+    min_valid_bytes = max(256 * 1024, int(BANDWIDTH_SIZE_MB * 1024 * 1024 * 0.25))
+    samples = []
 
-    try:
-        result = subprocess.run(curl_cmd, capture_output=True, text=True,
-                                timeout=BANDWIDTH_TIMEOUT + BANDWIDTH_PROCESS_BUFFER)
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split()
-            if len(parts) >= 3:
-                size_bytes = float(parts[0])
-                if size_bytes < expected_size:
-                    return (node_str, 0)
-                time_total = float(parts[2])
-                if time_total > 0:
-                    speed_mbps = (size_bytes * 8) / (time_total * 1000 * 1000)
-                    return (node_str, speed_mbps)
-    except Exception:
-        pass
-    return (node_str, 0)
+    for _ in range(max(1, samples_cfg)):
+        curl_cmd = [
+            "curl", "-s", "-o", null_device,
+            # 输出：下载字节数 / 首字节时间 / 总时间
+            "-w", "%{size_download} %{time_starttransfer} %{time_total}",
+            "-L",
+            "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "--noproxy", "*",
+            "--resolve", f"speed.cloudflare.com:{port}:{ip}",
+            "--connect-timeout", str(BANDWIDTH_CONNECT_TIMEOUT),
+            "--max-time", str(BANDWIDTH_TIMEOUT),
+        ] + insecure_flag + [url]   # 动态添加 --insecure（如果是 https）
+
+        try:
+            result = subprocess.run(curl_cmd, capture_output=True, text=True,
+                                    timeout=BANDWIDTH_TIMEOUT + BANDWIDTH_PROCESS_BUFFER)
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split()
+                if len(parts) >= 3:
+                    size_bytes = float(parts[0])
+                    ttfb = float(parts[1])
+                    time_total = float(parts[2])
+                    # 纯传输时间 = 总时间 - 首字节时间（扣除 TCP/TLS 握手与排队等待）
+                    transfer = time_total - ttfb
+                    if size_bytes >= min_valid_bytes and transfer > 0.05:
+                        speed_mbps = (size_bytes * 8) / (transfer * 1000 * 1000)
+                        samples.append(speed_mbps)
+        except Exception:
+            pass
+    # ----------------------------------------------------------
+
+    if not samples:
+        return (node_str, 0)
+    samples.sort()
+    # 取中位数：比平均值更能抵抗单次突发/卡顿
+    median = samples[len(samples) // 2]
+    return (node_str, median)
 
 def bandwidth_filter(candidates):
     if not candidates:
