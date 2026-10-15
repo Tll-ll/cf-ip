@@ -1143,31 +1143,41 @@ def check_http_server(node_str, timeout, max_retries, retry_delay, method, conne
 
     test_rounds = max(3, HTTP_JITTER_SAMPLES)
     latencies = []
+    max_attempts = (max_retries + 1) if inner_retry_enabled else 1
     for _ in range(test_rounds):
-        try:
-            start = time.time()
-            request_kwargs = {
-                "timeout": (connect_timeout, timeout),
-                "verify": False,
-                "allow_redirects": False,
-                "headers": headers,
-                "proxies": {"http": None, "https": None}
-            }
+        last_error = "connection_error"
+        # 连接类错误在单轮内重试（此前该参数未实现，一次抖动即判死节点）
+        for attempt in range(max_attempts):
+            try:
+                start = time.time()
+                request_kwargs = {
+                    "timeout": (connect_timeout, timeout),
+                    "verify": False,
+                    "allow_redirects": False,
+                    "headers": headers,
+                    "proxies": {"http": None, "https": None}
+                }
 
-            if method.upper() == "HEAD":
-                resp = requests.head(url, **request_kwargs)
-            else:
-                resp = requests.get(url, **request_kwargs)
+                if method.upper() == "HEAD":
+                    resp = requests.head(url, **request_kwargs)
+                else:
+                    resp = requests.get(url, **request_kwargs)
 
-            lat = (time.time() - start) * 1000
-            if resp.status_code != 400:
-                return (node_str, False, f"status_{resp.status_code}", 0.0, 0.0)
-            server = resp.headers.get("server", "")
-            if not server.lower().startswith("cloudflare"):
-                return (node_str, False, server, 0.0, 0.0)
-            latencies.append(lat)
-        except Exception:
-            return (node_str, False, "connection_error", 0.0, 0.0)
+                lat = (time.time() - start) * 1000
+                if resp.status_code != 400:
+                    return (node_str, False, f"status_{resp.status_code}", 0.0, 0.0)
+                server = resp.headers.get("server", "")
+                if not server.lower().startswith("cloudflare"):
+                    return (node_str, False, server, 0.0, 0.0)
+                latencies.append(lat)
+                break
+            except Exception:
+                last_error = "connection_error"
+                if attempt < max_attempts - 1 and retry_delay > 0:
+                    time.sleep(retry_delay)
+        else:
+            # 该轮连接重试耗尽仍失败 → 判定失败
+            return (node_str, False, last_error, 0.0, 0.0)
 
     if len(latencies) < test_rounds:
         return (node_str, False, "not_enough_samples", 0.0, 0.0)
@@ -1364,7 +1374,12 @@ def measure_bandwidth_curl(node_str):
         return (node_str, 0)
     samples.sort()
     # 取中位数：比平均值更能抵抗单次突发/卡顿
-    median = samples[len(samples) // 2]
+    # 偶数个样本时取中间两个的平均，避免 BANDWIDTH_SAMPLES=2 时退化成"取最大值"
+    n = len(samples)
+    if n % 2 == 1:
+        median = samples[n // 2]
+    else:
+        median = (samples[n // 2 - 1] + samples[n // 2]) / 2.0
     return (node_str, median)
 
 def bandwidth_filter(candidates):
