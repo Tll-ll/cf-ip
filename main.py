@@ -27,24 +27,15 @@ from urllib3.exceptions import InsecureRequestWarning
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# 禁用 SSL 警告 (用于 HTTP 检测)
+# 禁用 SSL 警告 (仅用于对 IP 直连的探测请求)
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-# ===== 全局禁用 SSL 验证（解决证书问题）=====
-import functools
-original_get = requests.get
-original_post = requests.post
-
-def new_get(url, *args, **kwargs):
-    kwargs.setdefault('verify', False)
-    return original_get(url, *args, **kwargs)
-
-def new_post(url, *args, **kwargs):
-    kwargs.setdefault('verify', False)
-    return original_post(url, *args, **kwargs)
-
-requests.get = new_get
-requests.post = new_post
+# ===== SSL 校验策略 =====
+# 探测类请求（直连任意 IP、节点证书不可信）显式传 verify=False；
+# 涉及凭证的请求（Cloudflare API / WxPusher / GitHub）保持默认校验，
+# 避免 token 在中间人场景下被截获。
+# 此前这里用猴补丁把 requests.get/post 全局设成 verify=False，
+# 会让 Cloudflare API 的 Bearer token 走未校验证书的连接。
 # ===========================================
 
 # ==================== 预编译正则 ====================
@@ -239,6 +230,8 @@ def load_config():
         "IP_CALIBRATION_TOKEN_FILE": "valid_tokens.txt",
         "IP_CALIBRATION_CACHE_FILE": "ipinfo_cache.txt",
         "OUTPUT_FILE": "ip.txt",
+        "MIN_OUTPUT_NODES": 8,
+        "MIN_KEEP_RATIO": 0.6,
         "ENABLE_LOGGING": False,
         "LOG_FILE": "cfnb.log",
         "FORCE_DIRECT": False,
@@ -365,7 +358,9 @@ TOKEN_FAILURE_THRESHOLD = cfg["TOKEN_FAILURE_THRESHOLD"]
 IP_CALIBRATION_MIN_INTERVAL = cfg["IP_CALIBRATION_MIN_INTERVAL"]
 IP_CALIBRATION_TOKEN_FILE = cfg["IP_CALIBRATION_TOKEN_FILE"]
 IP_CALIBRATION_CACHE_FILE = cfg["IP_CALIBRATION_CACHE_FILE"]
-OUTPUT_FILE = cfg["OUTPUT_FILE"]
+OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), cfg["OUTPUT_FILE"])
+MIN_OUTPUT_NODES = cfg["MIN_OUTPUT_NODES"]
+MIN_KEEP_RATIO = cfg["MIN_KEEP_RATIO"]
 ENABLE_LOGGING = cfg["ENABLE_LOGGING"]
 LOG_FILE = cfg["LOG_FILE"]
 FORCE_DIRECT = cfg["FORCE_DIRECT"]
@@ -426,6 +421,13 @@ IP_TXT_SHOW_BANDWIDTH = cfg["IP_TXT_SHOW_BANDWIDTH"]
 IP_TXT_SHOW_HTTP_LATENCY = cfg["IP_TXT_SHOW_HTTP_LATENCY"]
 IP_TXT_SHOW_HTTP_JITTER = cfg["IP_TXT_SHOW_HTTP_JITTER"]
 IP_TXT_SHOW_LATENCY = cfg["IP_TXT_SHOW_LATENCY"]
+
+# 记录本次运行中发生硬降级的环节（该层完全失效、退化为上一层的原始结果）。
+# 只要出现过降级，写 ip.txt 时就要求产出不低于上次，否则保留旧结果。
+DEGRADED_STAGES = []
+
+# 各阶段漏斗计数，运行结束写入 run_summary.json，便于事后定位是哪一层塌的
+RUN_STATS = {}
 
 if FORCE_DIRECT:
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -524,7 +526,7 @@ def get_ip_risk_level(ip):
     """查询单个 IP 的风险等级字符串，失败返回 '未知'"""
     url = f"https://api.ipapi.is/?q={ip}"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=10, verify=False)
         resp.raise_for_status()
         data = resp.json()
     except Exception:
@@ -638,7 +640,8 @@ def _query_country(ip, port):
         resp = requests.get(
             AVAILABILITY_CHECK_API,
             params={"proxyip": f"{ip}:{port}"},
-            timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT)
+            timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT),
+            verify=False
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -742,14 +745,20 @@ def fetch_additional_source(url):
     for attempt in range(1, FETCH_MAX_RETRIES + 1):
         try:
             print(f"正在请求数据源 {url} (尝试 {attempt}/{FETCH_MAX_RETRIES}) ...")
-            headers = {"Accept-Encoding": "gzip, deflate, br, zstd"}
+            # 只声明本地一定能解码的编码：环境里没有 zstandard 时声明 zstd
+            # 会让 urllib3 在 CDN 选 zstd 时抛 ContentDecodingError。
+            headers = {"Accept-Encoding": "gzip, deflate, br"}
             try:
-                resp = requests.get(url, timeout=(FETCH_CONNECT_TIMEOUT, FETCH_TIMEOUT), headers=headers)
+                resp = requests.get(url, timeout=(FETCH_CONNECT_TIMEOUT, FETCH_TIMEOUT),
+                                    headers=headers, verify=False)
                 resp.raise_for_status()
                 _src_text = resp.text
             except Exception as _e:
                 print("requests failed, try curl fallback: %s" % _e)
-                _r = subprocess.run(['curl.exe', '-sS', '-m', '15', '-A', 'curl/7.79.1', url],
+                curl_bin = shutil.which("curl")
+                if not curl_bin:
+                    raise
+                _r = subprocess.run([curl_bin, '-sS', '-m', '15', '-k', '-A', 'curl/7.79.1', url],
                                     capture_output=True, timeout=25)
                 if _r.returncode != 0 or not _r.stdout:
                     raise
@@ -1090,10 +1099,10 @@ def test_node(node_str):
     if not m:
         return None
     ip, port, country = m.groups()
-    min_lat, success = test_tcp_latency(ip, port)
+    max_lat, success = test_tcp_latency(ip, port)
     if success == 0 or (success / TCP_PROBES) < MIN_SUCCESS_RATE:
         return None
-    return (node_str, min_lat, country, success)
+    return (node_str, max_lat, country, success)
 
 def check_availability(node_str):
     m = IP_PORT_PATTERN.match(node_str)
@@ -1114,7 +1123,8 @@ def check_availability(node_str):
             resp = requests.get(
                 AVAILABILITY_CHECK_API,
                 params={"proxyip": proxyip},
-                timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT)
+                timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT),
+                verify=False
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -1142,7 +1152,11 @@ def check_http_server(node_str, timeout, max_retries, retry_delay, method, conne
     }
 
     test_rounds = max(3, HTTP_JITTER_SAMPLES)
+    # 允许的失败轮数：3 轮允许 1 轮抖动。此前任何一轮异常即判死节点，
+    # 网络瞬时拥塞会把整批节点连锁淘汰（实测同一批节点通过率可在 84% 与 0.7% 间跳变）。
+    allowed_fail = max(1, test_rounds // 3)
     latencies = []
+    failed_rounds = 0
     max_attempts = (max_retries + 1) if inner_retry_enabled else 1
     for _ in range(test_rounds):
         last_error = "connection_error"
@@ -1176,20 +1190,28 @@ def check_http_server(node_str, timeout, max_retries, retry_delay, method, conne
                 if attempt < max_attempts - 1 and retry_delay > 0:
                     time.sleep(retry_delay)
         else:
-            # 该轮连接重试耗尽仍失败 → 判定失败
-            return (node_str, False, last_error, 0.0, 0.0)
+            # 该轮重试耗尽仍失败：未超过容忍额度则继续下一轮
+            failed_rounds += 1
+            if failed_rounds > allowed_fail:
+                return (node_str, False, last_error, 0.0, 0.0)
 
-    if len(latencies) < test_rounds:
+    if len(latencies) < test_rounds - allowed_fail:
         return (node_str, False, "not_enough_samples", 0.0, 0.0)
 
-    # 用平均值算抖动（真实波动）
-    mean_lat = sum(latencies) / len(latencies)
-    variance = sum((l - mean_lat) ** 2 for l in latencies) / len(latencies)
+    # 延迟取中位数、抖动取标准差，两者基于同一组样本，口径一致。
+    # （此前延迟取 max、抖动取全样本标准差，排序会系统性偏向"某一次特别慢"的节点）
+    latencies.sort()
+    n = len(latencies)
+    if n % 2 == 1:
+        median_lat = latencies[n // 2]
+    else:
+        median_lat = (latencies[n // 2 - 1] + latencies[n // 2]) / 2.0
+
+    mean_lat = sum(latencies) / n
+    variance = sum((l - mean_lat) ** 2 for l in latencies) / n
     jitter = variance ** 0.5
 
-    # 返回给外层的延迟用最大值（最差一次）
-    avg_lat = max(latencies)
-    return (node_str, True, "cloudflare", avg_lat, jitter)
+    return (node_str, True, "cloudflare", median_lat, jitter)
 
 def availability_filter_candidates(candidates):
     if not TEST_AVAILABILITY or not candidates:
@@ -1237,6 +1259,7 @@ def availability_filter_with_retry(candidates):
             time.sleep(AVAILABILITY_RETRY_DELAY)
 
     print(f"可用性检测经 {AVAILABILITY_RETRY_MAX} 轮重试后仍无节点通过。")
+    DEGRADED_STAGES.append("可用性检测全部失败")
     send_wxpusher_notification(
         content=f"IP 可用性检测经 {AVAILABILITY_RETRY_MAX} 轮重试后仍无节点通过，已跳过过滤，使用原候选列表继续。",
         summary="可用性检测全部失败"
@@ -1257,8 +1280,12 @@ def http_server_filter(candidates, config):
     max_rounds = HTTP_TEST_MAX_ROUNDS
     round_delay = HTTP_TEST_ROUND_DELAY
 
+    # 通过率低于该比例视为"疑似拥塞/限速"而非节点质量差，降并发后重试
+    ANOMALY_RATE = 0.30
+    best = (None, {}, {})      # 记录各轮中最优的一次结果
+
     for round_num in range(1, max_rounds + 1):
-        print(f"\n[HTTP检测] 第 {round_num} 轮检测...")
+        print(f"\n[HTTP检测] 第 {round_num} 轮检测（并发 {workers}）...")
         print(f"\n对 {len(candidates)} 个候选节点进行 HTTP 二次筛选...")
 
         passed = []
@@ -1286,13 +1313,36 @@ def http_server_filter(candidates, config):
                     last_print = now
 
         print()
-        if passed:
+        if best[0] is None or len(passed) > len(best[0]):
+            best = (passed, http_latency_map, http_jitter_map)
+
+        rate = len(passed) / total if total else 0.0
+        if passed and rate >= ANOMALY_RATE:
             print(f"HTTP检测通过 {len(passed)} 个节点")
             return passed, http_latency_map, http_jitter_map
-        elif round_num < max_rounds:
-            print(f"本轮 HTTP 检测通过率为 0%，等待 {round_delay} 秒后重试...")
+
+        if round_num < max_rounds:
+            if rate < ANOMALY_RATE:
+                new_workers = max(4, workers // 2)
+                print(f"本轮通过率仅 {rate*100:.1f}%（低于 {ANOMALY_RATE*100:.0f}%），"
+                      f"疑似网络拥塞或限速，并发 {workers} → {new_workers} 后重试...")
+                workers = new_workers
+            else:
+                print(f"本轮 HTTP 检测通过率为 0%，等待 {round_delay} 秒后重试...")
             time.sleep(round_delay)
 
+    # 重试结束仍未达到正常通过率：优先返回已验证过的节点，而不是放行未验证的候选
+    if best[0]:
+        print(f"HTTP检测通过率持续偏低，已返回 {len(best[0])} 个验证通过的节点（未放行未验证节点）。")
+        DEGRADED_STAGES.append("HTTP检测通过率异常")
+        send_wxpusher_notification(
+            content=f"HTTP检测通过率持续低于 {ANOMALY_RATE*100:.0f}%，"
+                    f"已保留 {len(best[0])}/{len(candidates)} 个验证通过的节点，请检查网络状况。",
+            summary="HTTP检测通过率异常"
+        )
+        return best
+
+    DEGRADED_STAGES.append("HTTP检测全部失败")
     send_wxpusher_notification(
         content=f"HTTP检测经 {max_rounds} 轮重试后仍无节点通过，已降级使用过滤前列表。",
         summary="HTTP检测全部失败"
@@ -1484,10 +1534,10 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
                     continue
 
             if DNS_IP_RISK_FILTER_ENABLED:
+                # 先登记回退候选（万一所有节点都因风险等级被剔除，用这批兜底）
                 risk_fallback_ip_list.append(pure_ip)
                 risk_fallback_node_list.append(node_str)
 
-            if DNS_IP_RISK_FILTER_ENABLED:
                 risk_level = risk_map.get(pure_ip, "未知")
                 max_level = DNS_IP_RISK_MAX_LEVEL
                 if risk_level == "未知" or RISK_LEVEL_ORDER.get(risk_level, 99) > RISK_LEVEL_ORDER.get(max_level, 2):
@@ -1740,6 +1790,52 @@ def sync_to_github():
     )
     print(f"已尝试 {GITHUB_SYNC_MAX_RETRIES} 次推送，均失败，请检查网络或 GitHub 仓库状态。")
 
+def evaluate_output_guard(final_count, prev_count):
+    """最小产出保护判定。
+
+    返回 (是否拦截, 本次要求的阈值)。
+      - 阈值 = max(MIN_OUTPUT_NODES, 上次数量 × MIN_KEEP_RATIO)
+      - 若本次有环节硬降级（结果来自上一层未验证节点），阈值提高到不低于上次
+    """
+    if prev_count > 0:
+        need = max(MIN_OUTPUT_NODES, int(prev_count * MIN_KEEP_RATIO))
+    else:
+        need = MIN_OUTPUT_NODES
+    if DEGRADED_STAGES and final_count < prev_count:
+        need = max(need, prev_count)
+    return final_count < need, need
+
+
+def count_output_nodes(path):
+    """统计 ip.txt 中有效节点行数（忽略空行、广告行和注释行）"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return sum(1 for line in f
+                       if line.strip() and '#' in line and not line.lstrip().startswith('#'))
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return 0
+
+
+def write_run_summary(final_count, prev_count, blocked):
+    """把本次运行的漏斗计数写成 JSON，供通知脚本和事后排查使用"""
+    path = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FILE)), "run_summary.json")
+    payload = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "stages": RUN_STATS,
+        "final": final_count,
+        "prev": prev_count,
+        "blocked": blocked,
+        "degraded": list(DEGRADED_STAGES),
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"写入 run_summary.json 失败: {e}")
+
+
 def write_ip_txt(final_nodes, output_file,
                  header_enabled, header_lines,
                  footer_enabled, footer_lines,
@@ -1797,6 +1893,7 @@ def main():
                 if key not in seen:
                     seen.add(key)
                     nodes.append(n)
+    RUN_STATS["数据源合并"] = len(nodes)
     print(f"合并后总计 {len(nodes)} 个节点。")
 
     token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), IP_CALIBRATION_TOKEN_FILE)
@@ -1860,6 +1957,7 @@ def main():
                 print(f"\r进度：{completed}/{total} ({(completed/total)*100:.1f}%)", end="", flush=True)
                 last_print = now
 
+    RUN_STATS["TCP通过"] = len(results)
     print("\nTCP 测试完成！")
     if not results:
         print("没有通过成功率筛选的节点，请检查网络或降低 MIN_SUCCESS_RATE。")
@@ -1890,13 +1988,17 @@ def main():
         print("没有候选节点，退出。")
         sys.exit(0)
 
+    RUN_STATS["候选池"] = len(candidates)
     candidates_after_availability, avail_ip_info, avail_exit_details = availability_filter_with_retry(candidates)
+    RUN_STATS["可用性通过"] = len(candidates_after_availability)
     candidates_after_http, http_latency_map, http_jitter_map = http_server_filter(candidates_after_availability, cfg)
+    RUN_STATS["HTTP通过"] = len(candidates_after_http)
 
     bw_results = []
     for attempt in range(1, BANDWIDTH_RETRY_MAX + 1):
         print(f"\n[带宽测速] 第 {attempt} 轮测试...")
         bw_results = bandwidth_filter(candidates_after_http)
+        RUN_STATS["带宽有效"] = len(bw_results)
         if bw_results:
             break
         if attempt < BANDWIDTH_RETRY_MAX:
@@ -1905,6 +2007,7 @@ def main():
 
     if not bw_results:
         print("\n带宽测速多次重试仍无有效结果，将使用 TCP 筛选结果作为最终节点。")
+        DEGRADED_STAGES.append("带宽测速全部失败")
         send_wxpusher_notification(
             content=f"带宽测速经 {BANDWIDTH_RETRY_MAX} 轮尝试后仍无有效结果，已降级使用 TCP 排序节点。",
             summary="带宽测速全部失败"
@@ -1965,6 +2068,23 @@ def main():
                 line += f" 延迟 {tcp_lat*1000:.2f} ms"
             print(line)
 
+    # ============ 最小产出保护 ============
+    # 产出明显低于历史水平时，保留旧 ip.txt、不更新 DNS、不推送 GitHub。
+    # 历史事故：2026-10-17 20:05 那次只产出 1 个节点（正常 30~36），
+    # 却照常覆盖并 force push，导致公开订阅降级了 12 小时。
+    prev_count = count_output_nodes(OUTPUT_FILE)
+    blocked, need = evaluate_output_guard(len(final_selected), prev_count)
+    RUN_STATS["最终产出"] = len(final_selected)
+    write_run_summary(len(final_selected), prev_count, blocked)
+    if blocked:
+        reason = f"，且降级环节：{'、'.join(DEGRADED_STAGES)}" if DEGRADED_STAGES else ""
+        msg = (f"本次仅产出 {len(final_selected)} 个节点，低于安全阈值 {need}"
+               f"（上次 {prev_count}）{reason}。已保留旧 {OUTPUT_FILE}，本次不覆盖、不更新 DNS、不推送。")
+        print(f"\n[保护] {msg}")
+        send_wxpusher_notification(content=msg, summary="产出异常，已拦截发布")
+        return
+    # =====================================
+
     write_ip_txt(final_selected, OUTPUT_FILE,
                  AD_HEADER_ENABLED, AD_HEADER_LINES,
                  AD_FOOTER_ENABLED, AD_FOOTER_LINES,
@@ -2006,8 +2126,16 @@ if __name__ == "__main__":
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             log_path = os.path.join(script_dir, log_filename)
-            log_f = open(log_path, "w", encoding="utf-8")
-            print("日志已启用，输出将保存到 " + log_path)
+            # 追加写入 + 超过 2MB 轮转（此前用 "w" 每次覆盖，出问题后无法回溯）
+            try:
+                if os.path.exists(log_path) and os.path.getsize(log_path) > 2 * 1024 * 1024:
+                    os.replace(log_path, log_path + ".1")
+            except Exception:
+                pass
+            log_f = open(log_path, "a", encoding="utf-8")
+            log_f.write("\n" + "=" * 64 + "\n")
+            log_f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  运行开始\n")
+            print("日志已启用，输出将追加保存到 " + log_path)
         except Exception as e:
             print(f"无法打开日志文件 {log_path}: {e}")
             log_f = None

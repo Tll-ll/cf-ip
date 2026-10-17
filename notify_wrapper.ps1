@@ -4,13 +4,26 @@
 #   2) 同一端口协议自适应 (curl socks5h:// -> http://)
 #   3) 常见代理端口自动探测 (7890/7891/10808/10809/10810/10811/1080/1081/20171...)
 #   4) 直连 (Invoke-RestMethod -> curl)
-# 每轮结果写入 C:\cfnb\notify.log (保留最近300行)
+# 每轮结果写入 <脚本目录>\notify.log (保留最近300行)
 param([switch]$TestOnly)
 
 $ErrorActionPreference = 'Continue'
-$root = 'C:\cfnb'
+# 用脚本自身所在目录，项目搬家后无需改脚本
+$root = $PSScriptRoot
+if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $root) { $root = 'C:\cfnb' }
+try { Set-Location -Path $root } catch { }
 $logFile = Join-Path $root 'notify.log'
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Resolve-PythonPath {
+    $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    foreach ($p in @('C:\Program Files\Python312\python.exe', 'C:\Program Files\Python311\python.exe')) {
+        if (Test-Path $p) { return $p }
+    }
+    return 'python'
+}
 
 function Write-Log($msg) {
     $line = (Get-Date -Format 'MM-dd HH:mm:ss') + ' ' + $msg
@@ -28,27 +41,52 @@ $startTime = Get-Date
 if ($TestOnly) {
     $exit = 0
 } else {
-    $proc = Start-Process -FilePath 'C:\Program Files\Python312\python.exe' `
-        -ArgumentList ('"' + (Join-Path $root 'main.py') + '"') `
-        -WorkingDirectory $root -NoNewWindow -Wait -PassThru
-    $exit = $proc.ExitCode
+    $pyExe = Resolve-PythonPath
+    # 用调用运算符而不是 Start-Process -NoNewWindow：
+    # 后者在环境里同时存在 http_proxy / HTTP_PROXY 时会抛
+    # "字典中的关键字重复" 而直接崩掉，导致 main.py 根本不执行。
+    & $pyExe (Join-Path $root 'main.py')
+    $exit = $LASTEXITCODE
+    if ($null -eq $exit) { $exit = 0 }
 }
 $endTime = Get-Date
 
+# 注意：Get-Content 读单行文件时返回的是 String 而不是数组，
+# 直接 $lines[0] 会取到第一个「字符」（曾导致通知显示 "最快: 1"）。
 $lines = @()
-try { $lines = Get-Content (Join-Path $root 'ip.txt') -EA Stop | Where-Object { $_.Trim() -ne '' } } catch { }
+try { $lines = @(Get-Content (Join-Path $root 'ip.txt') -EA Stop | Where-Object { $_.Trim() -ne '' }) } catch { }
 $cnt = $lines.Count
 $top = 'n/a'
 if ($cnt -gt 0) { $top = $lines[0] }
 $elapsed = [int]($endTime - $startTime).TotalSeconds
 
+# 读取本次运行的漏斗统计（main.py 写出），用于定位是哪一层塌了
+$funnel = ''
+$blocked = $false
+try {
+    $sumPath = Join-Path $root 'run_summary.json'
+    if (Test-Path $sumPath) {
+        $sum = Get-Content $sumPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $blocked = [bool]$sum.blocked
+        $parts = @()
+        foreach ($p in $sum.stages.PSObject.Properties) { $parts += ('{0} {1}' -f $p.Name, $p.Value) }
+        if ($parts.Count -gt 0) { $funnel = ($parts -join ' -> ') }
+    }
+} catch { }
+
 if ($TestOnly) {
     $text = "[cfnb] 通知链路测试消息 | " + $startTime.ToString('MM-dd HH:mm')
+} elseif ($blocked) {
+    $text = "[cfnb] 产出异常已拦截：本次低于安全阈值，已保留旧列表（" + $cnt + " 条）" + [char]10 +
+        "漏斗: " + $funnel + [char]10 +
+        "耗时 " + $elapsed + "s | " + $startTime.ToString('MM-dd HH:mm')
 } elseif ($exit -eq 0 -and $cnt -gt 0) {
     $text = "[cfnb] 优选完成 " + $cnt + " 条" + [char]10 + "最快: " + $top + [char]10 +
         "耗时 " + $elapsed + "s | " + $startTime.ToString('MM-dd HH:mm')
+    if ($funnel -ne '') { $text += [char]10 + "漏斗: " + $funnel }
 } else {
     $text = "[cfnb] 运行失败 exit=" + $exit + " 节点数=" + $cnt + " | " + $startTime.ToString('MM-dd HH:mm')
+    if ($funnel -ne '') { $text += [char]10 + "漏斗: " + $funnel }
 }
 
 $enabled = $false; $token = ''; $chat = ''; $cfgProxy = ''

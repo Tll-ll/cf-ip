@@ -35,3 +35,7 @@ vless_test2.py
 vless_timing.py
 yt_test.py
 gen_sub.py
+
+# 运行时产物
+run_summary.json
+_run_live.out
