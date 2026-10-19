@@ -19,7 +19,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 function Resolve-PythonPath {
     $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) { return $cmd.Source }
-    foreach ($p in @('C:\Program Files\Python312\python.exe', 'C:\Program Files\Python311\python.exe')) {
+    foreach ($p in @('C:\py312\python.exe', 'C:\Program Files\Python312\python.exe', 'C:\Program Files\Python311\python.exe', 'C:\Python312\python.exe')) {
         if (Test-Path $p) { return $p }
     }
     return 'python'
