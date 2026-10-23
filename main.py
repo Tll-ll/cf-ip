@@ -193,12 +193,13 @@ def load_config():
         "ALLOWED_COUNTRIES": ["US"],
         "PRE_FILTER_BLOCKED_ENABLED": True,
         "PRE_FILTER_BLOCKED_COUNTRIES": ["CN"],
-        "PRE_FILTER_PORT_ENABLED": True,
+        "PRE_FILTER_PORT_ENABLED": False,
         "PRE_FILTER_PORTS": [443],
         "ENABLE_WXPUSHER": True,
         "WXPUSHER_APP_TOKEN": "your_app_token_here",
         "WXPUSHER_UIDS": ["your_uid_here"],
         "WXPUSHER_API_URL": "https://wxpusher.zjiecode.com/api/send/message",
+        "PROJECT_TAG": "cf-ip",
         "NOTIFY_TIMEOUT": 3,
         "NOTIFY_CONNECT_TIMEOUT": 3,
         "CF_ENABLED": True,
@@ -218,7 +219,7 @@ def load_config():
     {
         "url": "https://countrymerge.pages.dev/all.txt",
         "enabled": True
-    }
+    },
 ],
         "FETCH_MAX_RETRIES": 3,
         "FETCH_RETRY_DELAY": 3,
@@ -266,24 +267,30 @@ def load_config():
         "DNS_IP_RISK_FILTER_ENABLED": False,
         "DNS_IP_RISK_MAX_LEVEL": "高风险",
         "DNS_UPDATE_TARGET_COUNT": 15,
-        "BANDWIDTH_SIZE_MB": 1.0,
-        "BANDWIDTH_TIMEOUT": 3,
-        "BANDWIDTH_RETRY_MAX": 2,
+        "BANDWIDTH_SIZE_MB": 2.0,
+        "BANDWIDTH_TIMEOUT": 6,
+        "BANDWIDTH_RETRY_MAX": 3,
         "BANDWIDTH_RETRY_DELAY": 3,
         "BANDWIDTH_URL_TEMPLATE": "{scheme}://speed.cloudflare.com:{port}/__down?bytes={bytes}",
+        "BANDWIDTH_UPLOAD_ENABLED": True,
+        "BANDWIDTH_UPLOAD_SIZE_MB": 2.0,
+        "BANDWIDTH_UPLOAD_TIMEOUT": 6,
+        "BANDWIDTH_UPLOAD_URL_TEMPLATE": "{scheme}://speed.cloudflare.com:{port}/__up",
         "BANDWIDTH_PROCESS_BUFFER": 2,
-        "BANDWIDTH_CONNECT_TIMEOUT": 3,
-        "BANDWIDTH_SAMPLES": 2,
+        "BANDWIDTH_CONNECT_TIMEOUT": 5,
+        "BANDWIDTH_SAMPLES": 3,
         "SPEED_WEIGHT": 3.0,
         "IP_CALIBRATION_CONCURRENCY": 300,
         "MAX_WORKERS": 300,
         "AVAILABILITY_WORKERS": 32,
         "FALLBACK_WORKERS": 32,
-        "BANDWIDTH_WORKERS": 3,
+        "BANDWIDTH_WORKERS": 8,
         "HTTP_TEST_WORKERS": 32,
         "DNS_UPDATE_MAX_RETRIES": 3,
         "DNS_UPDATE_RETRY_DELAY": 3,
         "GITHUB_SYNC_MAX_RETRIES": 3,
+        "OUTPUT_GUARD_RATIO": 0.3,
+        "OUTPUT_MIN_NODES": 5,
         "GITHUB_SYNC_RETRY_DELAY": 3,
         "GIT_SYNC_PROCESS_TIMEOUT": 180,
         "AD_HEADER_ENABLED": False,
@@ -334,13 +341,19 @@ PRE_FILTER_BLOCKED_COUNTRIES = [c.upper() for c in cfg["PRE_FILTER_BLOCKED_COUNT
 PRE_FILTER_PORT_ENABLED = cfg["PRE_FILTER_PORT_ENABLED"]
 PRE_FILTER_PORTS = [str(p) for p in cfg["PRE_FILTER_PORTS"]]
 ENABLE_WXPUSHER = cfg["ENABLE_WXPUSHER"]
-WXPUSHER_APP_TOKEN = cfg["WXPUSHER_APP_TOKEN"]
-WXPUSHER_UIDS = cfg["WXPUSHER_UIDS"]
+# 密钥优先读环境变量，config.json 里的明文仅作为回退。
+# 这样可以把真实 token 移出 config.json（如 systemd EnvironmentFile / ~/.config 私密文件），
+# 降低明文落盘与误提交的风险。
+WXPUSHER_APP_TOKEN = os.environ.get("WXPUSHER_APP_TOKEN") or cfg["WXPUSHER_APP_TOKEN"]
+WXPUSHER_UIDS = (os.environ.get("WXPUSHER_UIDS").split(",")
+                  if os.environ.get("WXPUSHER_UIDS")
+                  else cfg["WXPUSHER_UIDS"])
 WXPUSHER_API_URL = cfg["WXPUSHER_API_URL"]
+PROJECT_TAG = cfg["PROJECT_TAG"]
 NOTIFY_TIMEOUT = cfg["NOTIFY_TIMEOUT"]
 NOTIFY_CONNECT_TIMEOUT = cfg["NOTIFY_CONNECT_TIMEOUT"]
 CF_ENABLED = cfg["CF_ENABLED"]
-CF_API_TOKEN = cfg["CF_API_TOKEN"]
+CF_API_TOKEN = os.environ.get("CF_API_TOKEN") or cfg["CF_API_TOKEN"]
 CF_ZONE_ID = cfg["CF_ZONE_ID"]
 CF_DNS_RECORD_NAME = cfg["CF_DNS_RECORD_NAME"]
 CF_TTL = cfg["CF_TTL"]
@@ -349,9 +362,9 @@ CF_DNS_CONNECT_TIMEOUT = cfg["CF_DNS_CONNECT_TIMEOUT"]
 CF_DNS_READ_TIMEOUT = cfg["CF_DNS_READ_TIMEOUT"]
 DNS_RECORD_TYPE = cfg["DNS_RECORD_TYPE"]
 ADDITIONAL_SOURCES = cfg["ADDITIONAL_SOURCES"]
-FETCH_MAX_RETRIES = cfg["FETCH_MAX_RETRIES"]
 FETCH_RETRY_DELAY = cfg["FETCH_RETRY_DELAY"]
 FETCH_TIMEOUT = cfg["FETCH_TIMEOUT"]
+FETCH_MAX_RETRIES = cfg["FETCH_MAX_RETRIES"]
 FETCH_CONNECT_TIMEOUT = cfg["FETCH_CONNECT_TIMEOUT"]
 IP_CALIBRATION_ENABLED = cfg["IP_CALIBRATION_ENABLED"]
 TOKEN_FAILURE_THRESHOLD = cfg["TOKEN_FAILURE_THRESHOLD"]
@@ -396,6 +409,11 @@ BANDWIDTH_TIMEOUT = cfg["BANDWIDTH_TIMEOUT"]
 BANDWIDTH_RETRY_MAX = cfg["BANDWIDTH_RETRY_MAX"]
 BANDWIDTH_RETRY_DELAY = cfg["BANDWIDTH_RETRY_DELAY"]
 BANDWIDTH_URL_TEMPLATE = cfg["BANDWIDTH_URL_TEMPLATE"]
+BANDWIDTH_UPLOAD_ENABLED = cfg.get("BANDWIDTH_UPLOAD_ENABLED", True)
+BANDWIDTH_UPLOAD_SIZE_MB = cfg.get("BANDWIDTH_UPLOAD_SIZE_MB", 2.0)
+BANDWIDTH_UPLOAD_TIMEOUT = cfg.get("BANDWIDTH_UPLOAD_TIMEOUT", 6)
+BANDWIDTH_UPLOAD_URL_TEMPLATE = cfg.get("BANDWIDTH_UPLOAD_URL_TEMPLATE", "{scheme}://speed.cloudflare.com:{port}/__up")
+BANDWIDTH_MIN_SPEED_MBPS = cfg.get("BANDWIDTH_MIN_SPEED_MBPS", 0.0)
 BANDWIDTH_PROCESS_BUFFER = cfg["BANDWIDTH_PROCESS_BUFFER"]
 BANDWIDTH_CONNECT_TIMEOUT = cfg["BANDWIDTH_CONNECT_TIMEOUT"]
 BANDWIDTH_SAMPLES = cfg.get("BANDWIDTH_SAMPLES", 2)
@@ -409,6 +427,8 @@ HTTP_TEST_WORKERS = cfg["HTTP_TEST_WORKERS"]
 DNS_UPDATE_MAX_RETRIES = cfg["DNS_UPDATE_MAX_RETRIES"]
 DNS_UPDATE_RETRY_DELAY = cfg["DNS_UPDATE_RETRY_DELAY"]
 GITHUB_SYNC_MAX_RETRIES = cfg["GITHUB_SYNC_MAX_RETRIES"]
+OUTPUT_GUARD_RATIO = cfg.get("OUTPUT_GUARD_RATIO", 0.3)
+OUTPUT_MIN_NODES = cfg.get("OUTPUT_MIN_NODES", 5)
 GITHUB_SYNC_RETRY_DELAY = cfg["GITHUB_SYNC_RETRY_DELAY"]
 GIT_SYNC_PROCESS_TIMEOUT = cfg["GIT_SYNC_PROCESS_TIMEOUT"]
 AD_HEADER_ENABLED = cfg["AD_HEADER_ENABLED"]
@@ -527,10 +547,11 @@ def send_wxpusher_notification(content, summary):
     if not ENABLE_WXPUSHER:
         return
     try:
+        # 加上项目标识，避免原版与稳定版的消息无法区分
         payload = {
             "appToken": WXPUSHER_APP_TOKEN,
-            "content": content,
-            "summary": summary,
+            "content": f"[{PROJECT_TAG}] {content}",
+            "summary": f"[{PROJECT_TAG}] {summary}",
             "uids": WXPUSHER_UIDS
         }
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -1032,9 +1053,13 @@ async def query_new_ips(new_ips, token_list, concurrency, min_interval, trust_en
             if f:
                 f.close()
     print()
-    if total > 0 and failed == total:
+    # 仅在样本量足够大时才判定"token 全部失效"，
+    # 否则个别 IP 查询失败（如 IP 已下线）会造成误报
+    if total >= 20 and failed == total:
         send_wxpusher_notification("IP地区校准：所有IP查询均失败，可能所有token均已失效。", "IP校准全失败")
         print("警告：所有 IP 地区校准失败，可能所有 token 已失效。")
+    elif total > 0 and failed == total:
+        print(f"提示：本次 {total} 个待查 IP 全部查询失败（样本量小，不判定 token 失效）。")
     return result
 
 def calibrate_regions(nodes, token_file, cache_file):
@@ -1420,7 +1445,8 @@ def measure_bandwidth_curl(node_str):
     # 单节点测速次数（可从配置读取，默认 2）
     samples_cfg = globals().get("BANDWIDTH_SAMPLES", 2)
     # 至少下载这么多字节才算一次有效样本（避免刚连上就断导致虚高）
-    min_valid_bytes = max(256 * 1024, int(BANDWIDTH_SIZE_MB * 1024 * 1024 * 0.25))
+    # 调宽：降低到 64KB 并要求 0.02s 传输，避免“只淘汰慢节点”
+    min_valid_bytes = max(64 * 1024, int(BANDWIDTH_SIZE_MB * 1024 * 1024 * 0.05))
     samples = []
 
     for _ in range(max(1, samples_cfg)):
@@ -1447,7 +1473,7 @@ def measure_bandwidth_curl(node_str):
                     time_total = float(parts[2])
                     # 纯传输时间 = 总时间 - 首字节时间（扣除 TCP/TLS 握手与排队等待）
                     transfer = time_total - ttfb
-                    if size_bytes >= min_valid_bytes and transfer > 0.05:
+                    if size_bytes >= min_valid_bytes and transfer > 0.02:
                         speed_mbps = (size_bytes * 8) / (transfer * 1000 * 1000)
                         samples.append(speed_mbps)
         except Exception:
@@ -1466,6 +1492,87 @@ def measure_bandwidth_curl(node_str):
         median = (samples[n // 2 - 1] + samples[n // 2]) / 2.0
     return (node_str, median)
 
+
+def measure_upload_speed_curl(node_str):
+    """测试节点上传速度（使用 Cloudflare __up 端点）"""
+    m = IP_PORT_PATTERN.match(node_str)
+    if not m:
+        return (node_str, 0)
+    ip, port = m.group(1), m.group(2)
+    port_int = int(port)
+
+    # ---------- 端口与协议的映射 ----------
+    HTTP_PORTS = {80, 8080, 8880, 2052, 2082, 2086, 2095}
+    HTTPS_PORTS = {443, 2053, 2083, 2087, 2096, 8443}
+
+    if port_int in HTTP_PORTS:
+        scheme = "http"
+        insecure_flag = []
+    elif port_int in HTTPS_PORTS:
+        scheme = "https"
+        insecure_flag = ["--insecure"]
+    else:
+        scheme = "https"
+        insecure_flag = ["--insecure"]
+
+    null_device = "NUL" if sys.platform == "win32" else "/dev/null"
+
+    # 上传测试使用 POST 方式发送数据到 __up 端点
+    url = BANDWIDTH_UPLOAD_URL_TEMPLATE.format(
+        scheme=scheme,
+        port=port,
+        bytes=int(BANDWIDTH_UPLOAD_SIZE_MB * 1024 * 1024)
+    )
+
+    # 上传数据：生成随机数据文件用于 POST
+    upload_data = os.urandom(int(BANDWIDTH_UPLOAD_SIZE_MB * 1024 * 1024))
+    upload_file = null_device  # 我们不需要保存，直接用 --data-binary
+
+    samples_cfg = globals().get("BANDWIDTH_SAMPLES", 2)
+    samples = []
+
+    for _ in range(max(1, samples_cfg)):
+        curl_cmd = [
+            "curl", "-s", "-o", null_device,
+            "-w", "%{size_upload} %{time_total}",
+            "-X", "POST",
+            "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "--noproxy", "*",
+            "--resolve", f"speed.cloudflare.com:{port}:{ip}",
+            "--connect-timeout", str(BANDWIDTH_CONNECT_TIMEOUT),
+            "--max-time", str(BANDWIDTH_UPLOAD_TIMEOUT),
+        ] + insecure_flag + [
+            "--data-binary", f"@{'/dev/stdin'}",
+            url
+        ]
+
+        try:
+            result = subprocess.run(
+                curl_cmd, input=upload_data, capture_output=True,
+                timeout=BANDWIDTH_UPLOAD_TIMEOUT + BANDWIDTH_PROCESS_BUFFER
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.decode().strip().split()
+                if len(parts) >= 2:
+                    size_bytes = float(parts[0])
+                    time_total = float(parts[1])
+                    if size_bytes >= 64 * 1024 and time_total > 0.02:
+                        speed_mbps = (size_bytes * 8) / (time_total * 1000 * 1000)
+                        samples.append(speed_mbps)
+        except Exception:
+            pass
+
+    if not samples:
+        return (node_str, 0)
+    samples.sort()
+    n = len(samples)
+    if n % 2 == 1:
+        median = samples[n // 2]
+    else:
+        median = (samples[n // 2 - 1] + samples[n // 2]) / 2.0
+    return (node_str, median)
+
+
 def bandwidth_filter(candidates):
     if not candidates:
         return []
@@ -1475,18 +1582,27 @@ def bandwidth_filter(candidates):
         return []
 
     print(f"\n开始带宽测速（对前 {len(candidates)} 个节点，并发 {BANDWIDTH_WORKERS}，超时 {BANDWIDTH_TIMEOUT}s）...")
+    print(f"  下载测速：BANDWIDTH_SIZE_MB={BANDWIDTH_SIZE_MB}MB，上传测速：BANDWIDTH_UPLOAD_SIZE_MB={BANDWIDTH_UPLOAD_SIZE_MB}MB")
     results = []
     completed = 0
     total = len(candidates)
     last_print = time.time()
 
+    def test_node(node):
+        """同时测试下载和上传速度"""
+        dl_node, dl_speed = measure_bandwidth_curl(node)
+        ul_speed = 0
+        if BANDWIDTH_UPLOAD_ENABLED:
+            _, ul_speed = measure_upload_speed_curl(node)
+        return (node, dl_speed, ul_speed)
+
     with ThreadPoolExecutor(max_workers=BANDWIDTH_WORKERS) as executor:
-        futures = {executor.submit(measure_bandwidth_curl, node): node for node in candidates}
+        futures = {executor.submit(test_node, node): node for node in candidates}
         for future in as_completed(futures):
             completed += 1
-            node, speed = future.result()
-            if speed > 0:
-                results.append((node, speed))
+            node, dl_speed, ul_speed = future.result()
+            if dl_speed > 0:
+                results.append((node, dl_speed, ul_speed))
             now = time.time()
             if now - last_print >= PROGRESS_PRINT_INTERVAL or completed == total:
                 print(f"\r[带宽测速] 进度：{completed}/{total} ({(completed/total)*100:.1f}%)", end="", flush=True)
@@ -1521,7 +1637,7 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
     risk_map = {}
     if DNS_IP_RISK_FILTER_ENABLED and full_bw_results:
         ip_set = set()
-        for node_str, _ in full_bw_results:
+        for node_str, _, _ in full_bw_results:
             if ':' in node_str:
                 ip_set.add(node_str.split(':')[0])
         if ip_set:
@@ -1542,7 +1658,7 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
         if FILTER_BLOCKED_COUNTRIES_ENABLED:
             blocked_set = {c.upper() for c in BLOCKED_COUNTRIES}
 
-        for node_str, speed in full_bw_results:
+        for node_str, dl_speed, _ in full_bw_results:
             if ':' not in node_str:
                 continue
             parts = node_str.split(':')
@@ -1646,8 +1762,10 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
 
     print(f"\n准备将以下 {len(dns_content_list)} 个{'IP' if record_type=='A' else 'IP:端口'} 更新到 Cloudflare DNS（记录类型 {record_type}）:")
     speed_map = {}
+    upload_map = {}
     if full_bw_results:
-        speed_map = {node: speed for node, speed in full_bw_results}
+        speed_map = {node: speed for node, speed, _ in full_bw_results}
+        upload_map = {node: ul_speed for node, _, ul_speed in full_bw_results if ul_speed > 0}
     for i, (content, node) in enumerate(zip(dns_content_list, dns_node_list), 1):
         speed = speed_map.get(node, 0)
         lat_ms = float('inf')
@@ -1784,7 +1902,8 @@ def sync_to_github():
 
     if sys.platform != "win32":
         try:
-            os.chmod(script_path, 0o755)
+            # 0o700: 脚本内含 GitHub Token，仅允许属主读写执行
+            os.chmod(script_path, 0o700)
         except Exception:
             pass
 
@@ -1827,17 +1946,26 @@ def sync_to_github():
 def evaluate_output_guard(final_count, prev_count):
     """最小产出保护判定。
 
-    返回 (是否拦截, 本次要求的阈值)。
-      - 阈值 = max(MIN_OUTPUT_NODES, 上次数量 × MIN_KEEP_RATIO)
-      - 若本次有环节硬降级（结果来自上一层未验证节点），阈值提高到不低于上次
+    历史事故：2026-10-17 20:05 那次只产出 1 个节点（正常 30~36），
+    却照常覆盖并 force push，导致公开订阅降级了 12 小时。
+
+    判定采用「双重条件」，只有同时满足才拦截，避免误伤正常的质量过滤：
+      1) 相对崩塌：final < prev * ratio（产出相对历史大幅萎缩）
+      2) 绝对过低：final < min_nodes（本次几乎没产出可用节点）
+
+    只满足其一不拦截——例如带宽门槛把 30 个节点过滤到 10 个，
+    属于质量过滤的正常结果，不应保留旧文件；而跌到 1~2 个则是运行异常。
+
+    首次运行（prev_count == 0）无历史基线，不拦截。
     """
-    if prev_count > 0:
-        need = max(MIN_OUTPUT_NODES, int(prev_count * MIN_KEEP_RATIO))
-    else:
-        need = MIN_OUTPUT_NODES
-    if DEGRADED_STAGES and final_count < prev_count:
-        need = max(need, prev_count)
-    return final_count < need, need
+    if prev_count <= 0:
+        return False, 0
+    ratio = float(OUTPUT_GUARD_RATIO)
+    min_nodes = int(OUTPUT_MIN_NODES)
+    need_rel = max(1, int(prev_count * ratio))
+    if final_count < need_rel and final_count < min_nodes:
+        return True, need_rel
+    return False, need_rel
 
 
 def count_output_nodes(path):
@@ -1874,22 +2002,28 @@ def write_ip_txt(final_nodes, output_file,
                  header_enabled, header_lines,
                  footer_enabled, footer_lines,
                  perline_enabled, perline_text,
-                 speed_map=None, latency_map=None,
+                 speed_map=None, upload_map=None, latency_map=None,
                  http_latency_map=None, http_jitter_map=None):
     with open(output_file, "w", encoding="utf-8") as f:
         if header_enabled:
             for line in header_lines:
                 f.write(line + "\n")
         for node in final_nodes:
-            line = node
-            if IP_TXT_SHOW_BANDWIDTH and speed_map and node in speed_map:
-                line += f" {speed_map[node]:.2f} Mbps"
-            if IP_TXT_SHOW_HTTP_LATENCY and http_latency_map and node in http_latency_map:
-                line += f" {http_latency_map[node]:.2f} ms"
-            if IP_TXT_SHOW_HTTP_JITTER and http_jitter_map and node in http_jitter_map:
-                line += f" {http_jitter_map[node]:.2f} ms"
+            # 统一格式：ip:port#国家 延迟 下载速度
+            extras = []
             if IP_TXT_SHOW_LATENCY and latency_map and node in latency_map:
-                line += f" {latency_map[node]*1000:.2f} ms"
+                extras.append(f"{latency_map[node]*1000:.0f}ms")
+            if IP_TXT_SHOW_HTTP_LATENCY and http_latency_map and node in http_latency_map:
+                extras.append(f"{http_latency_map[node]:.0f}ms")
+            if IP_TXT_SHOW_BANDWIDTH and speed_map and node in speed_map:
+                extras.append(f"{speed_map[node]:.2f}Mbps")
+            if IP_TXT_SHOW_BANDWIDTH and upload_map and node in upload_map:
+                extras.append(f"上传{upload_map[node]:.2f}Mbps")
+            if IP_TXT_SHOW_HTTP_JITTER and http_jitter_map and node in http_jitter_map:
+                extras.append(f"{http_jitter_map[node]:.0f}ms")
+            line = node
+            if extras:
+                line += " " + " ".join(extras)
             if perline_enabled and perline_text:
                 line += perline_text
             f.write(line + "\n")
@@ -2032,6 +2166,13 @@ def main():
     for attempt in range(1, BANDWIDTH_RETRY_MAX + 1):
         print(f"\n[带宽测速] 第 {attempt} 轮测试...")
         bw_results = bandwidth_filter(candidates_after_http)
+        # 下载速度阈值过滤：剔除低于设定阈值的节点
+        if BANDWIDTH_MIN_SPEED_MBPS > 0:
+            before_count = len(bw_results)
+            bw_results = [(node, dl, ul) for node, dl, ul in bw_results if dl >= BANDWIDTH_MIN_SPEED_MBPS]
+            after_count = len(bw_results)
+            if before_count != after_count:
+                print(f"下载速度阈值过滤（≥{BANDWIDTH_MIN_SPEED_MBPS} Mbps）：{before_count} -> {after_count} 个节点")
         RUN_STATS["带宽有效"] = len(bw_results)
         if bw_results:
             break
@@ -2047,6 +2188,7 @@ def main():
             summary="带宽测速全部失败"
         )
         speed_map = {}
+        upload_map = {}
         if USE_GLOBAL_MODE:
             final_selected = [node for node, _, _, _ in results[:GLOBAL_TOP_N]]
         else:
@@ -2056,9 +2198,10 @@ def main():
                 for node_str, _, _ in nodes_sorted[:PER_COUNTRY_TOP_N]:
                     final_selected.append(node_str)
     else:
-        speed_map = {node: speed for node, speed in bw_results}
+        speed_map = {node: speed for node, speed, _ in bw_results}
+        upload_map = {node: ul_speed for node, _, ul_speed in bw_results if ul_speed > 0}
         scored_nodes = []
-        for node, speed in bw_results:
+        for node, speed, ul_speed in bw_results:
             tcp_lat = latency_map.get(node, 999.0)
             http_lat = http_latency_map.get(node, 999999.0)
             http_jitter = http_jitter_map.get(node, 999999.0)
@@ -2082,7 +2225,7 @@ def main():
             final_selected = []
             for country, items in country_scored.items():
                 items.sort(key=lambda x: x[1], reverse=True)
-                for item in items[:PER_COUNTRY_TOP_N]:
+                for item in items:
                     final_selected.append(item[0])
             score_dict = {item[0]: item[1] for item in scored_nodes}
             final_selected.sort(key=lambda n: score_dict.get(n, 0), reverse=True)
@@ -2090,16 +2233,19 @@ def main():
         print("\n================ 最终优选节点 ================")
         for i, node in enumerate(final_selected, 1):
             speed = speed_map.get(node, 0)
+            ul_speed = upload_map.get(node, 0) if 'upload_map' in dir() else 0
             tcp_lat = latency_map.get(node, float('inf'))
             http_lat = http_latency_map.get(node, None)
             http_jitter = http_jitter_map.get(node, None)
-            line = f"{i}. {node} 速度 {speed:.2f} Mbps"
+            line = f"{i}. {node} 下载 {speed:.2f} Mbps"
+            if ul_speed > 0:
+                line += f" 上传 {ul_speed:.2f} Mbps"
             if http_lat is not None:
                 line += f" 延迟 {http_lat:.2f} ms"
             if http_jitter is not None:
                 line += f" 抖动 {http_jitter:.2f} ms"
             if tcp_lat != float('inf'):
-                line += f" 延迟 {tcp_lat*1000:.2f} ms"
+                line += f" TCP延迟 {tcp_lat*1000:.2f} ms"
             print(line)
 
     # ============ 最小产出保护 ============
@@ -2124,6 +2270,7 @@ def main():
                  AD_FOOTER_ENABLED, AD_FOOTER_LINES,
                  AD_PERLINE_ENABLED, AD_PERLINE_TEXT,
                  speed_map=speed_map,
+                 upload_map=upload_map,
                  latency_map=latency_map,
                  http_latency_map=http_latency_map,
                  http_jitter_map=http_jitter_map)
@@ -2142,6 +2289,24 @@ def main():
     )
 
     sync_to_github()
+
+    # ---- 成功完成通知：汇总本次结果 ----
+    try:
+        _degraded = list(DEGRADED_STAGES)
+        _lines = [f"共优选 {len(final_selected)} 个节点，已保存 {OUTPUT_FILE} 并同步到 GitHub。"]
+        if final_selected:
+            _top = final_selected[0].split('#')[0]
+            _lines.append(f"最快节点：{final_selected[0]}")
+        if _degraded:
+            _lines.append("降级环节：" + "、".join(_degraded))
+        else:
+            _lines.append("全部环节正常，无降级。")
+        send_wxpusher_notification(
+            content="\n".join(_lines),
+            summary=f"优选完成：{len(final_selected)} 个节点"
+        )
+    except Exception as e:
+        print(f"发送完成通知失败: {e}")
 
 if __name__ == "__main__":
     import atexit
